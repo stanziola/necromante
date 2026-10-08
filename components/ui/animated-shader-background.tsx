@@ -2,8 +2,8 @@
 
 // AnimatedShaderBackground — the 21st.dev "AnoAI" aurora shader, ported from
 // three.js to plain WebGL2 (no dependencies) and recoloured to white comets
-// on black. One canvas that fills its parent, drawn at the screen's full
-// resolution.
+// on black, plus twinkling stars. One canvas that fills its parent, drawn at
+// the screen's full resolution.
 
 import { useEffect, useRef } from "react"
 
@@ -50,6 +50,44 @@ float fbm(vec2 x) {
   return v;
 }
 
+// Twinkling stars: at most one per cell of a grid STAR_CELLS cells tall.
+// Each star runs its own 2–6 s cycle; in every cycle it may light up — at a
+// new spot in its cell — fading in and back out, so stars come and go at
+// random across the screen. Sizes are in pixels of a 1080 px tall screen.
+#define STAR_CELLS 16.0
+#define STAR_CHANCE 0.14
+
+float hash12(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+
+vec2 hash22(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.xx + p3.yz) * p3.zy);
+}
+
+float stars(vec2 fragCoord) {
+  vec2 grid = fragCoord / iResolution.y * STAR_CELLS;
+  vec2 cell = floor(grid);
+  float cycle = iTime * (0.17 + 0.33 * hash12(cell)) + hash12(cell + 0.5);
+  vec2 seed = cell + floor(cycle) * vec2(13.7, 7.3);
+  if (hash12(seed) > STAR_CHANCE) return 0.0;
+
+  vec2 d = (fract(grid) - (0.25 + 0.5 * hash22(seed))) / STAR_CELLS * 1080.0;
+  float peak = 0.45 + 0.55 * pow(hash12(seed + 4.2), 3.0); // mostly faint
+  float fade = sin(fract(cycle) * 3.14159265);
+  fade *= fade;
+  float r2 = dot(d, d);
+  float core = exp(-r2 / 1.5) + 0.12 * exp(-r2 / 30.0); // point + soft halo
+  // A thin cross that shows on the brighter stars near their peak.
+  vec2 a = abs(d);
+  float glint = exp(-a.x * 2.0 - a.y * 0.22) + exp(-a.y * 2.0 - a.x * 0.22);
+  return peak * fade * (core + 0.5 * glint * fade * peak);
+}
+
 void main() {
   vec2 shake = vec2(sin(iTime * 1.2) * 0.005, cos(iTime * 2.1) * 0.005);
   vec2 p = ((gl_FragCoord.xy + shake * iResolution.xy) - iResolution.xy * 0.5) / iResolution.y * mat2(6.0, -4.0, 4.0, 6.0);
@@ -72,8 +110,8 @@ void main() {
   }
 
   // max() keeps pow() away from negative bases, which are NaN on some GPUs.
-  o = tanh(pow(max(o / 100.0, 0.0), 1.6));
-  fragColor = vec4(vec3(o * 1.5), 1.0);
+  float col = tanh(pow(max(o / 100.0, 0.0), 1.6)) * 1.5 + stars(gl_FragCoord.xy);
+  fragColor = vec4(vec3(col), 1.0);
 }`
 
 // Drawn at device pixels, capped at 2×: beyond that a soft effect gains
