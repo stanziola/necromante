@@ -2,8 +2,8 @@
 
 // AnimatedShaderBackground — the 21st.dev "AnoAI" aurora shader, ported from
 // three.js to plain WebGL2 (no dependencies) and recoloured to white comets
-// on black. One canvas that fills its parent; the render resolution adapts so
-// the animation keeps up with the display's refresh rate.
+// on black. One canvas that fills its parent, drawn at the screen's full
+// resolution.
 
 import { useEffect, useRef } from "react"
 
@@ -60,7 +60,9 @@ void main() {
 
   for (float i = 0.0; i < 35.0; i++) {
     v = p + cos(i * i + (iTime + p.x * 0.08) * 0.025 + i * vec2(13.0, 11.0)) * 3.5 + vec2(sin(iTime * 3.0 + i) * 0.003, cos(iTime * 3.5 - i) * 0.003);
-    float tailNoise = fbm(v + vec2(iTime * 0.5, i)) * 0.3 * (1.0 - (i / 35.0));
+    // Only the first octave of fbm() for the tails: the other two changed
+    // the image by at most 4/255 and doubled the GPU time.
+    float tailNoise = 0.3 * noise(v + vec2(iTime * 0.5, i)) * 0.3 * (1.0 - (i / 35.0));
     // White comets: a single brightness instead of the original RGB aurora
     // colour (this is its dominant, blue channel).
     float brightness = 0.7 + 0.3 * sin(i * 0.4 + iTime * 0.3);
@@ -74,12 +76,9 @@ void main() {
   fragColor = vec4(vec3(o * 1.5), 1.0);
 }`
 
-// Shader pixels rendered at start, and the range the adaptive scale may move
-// in (1 = one shader pixel per CSS pixel; devicePixelRatio is ignored on
-// purpose — the effect is soft, so extra pixels only cost frames).
-const START_PIXELS = 600_000
-const MIN_SCALE = 0.25
-const MAX_SCALE = 1
+// Drawn at device pixels, capped at 2×: beyond that a soft effect gains
+// nothing visible and phones would pay up to 2.25× the GPU work.
+const MAX_PIXEL_RATIO = 2
 
 export function AnimatedShaderBackground({ className }: { className?: string }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -142,14 +141,11 @@ export function AnimatedShaderBackground({ className }: { className?: string }) 
     const rect = canvas.getBoundingClientRect()
     let cssWidth = rect.width
     let cssHeight = rect.height
-    let scale = Math.min(
-      MAX_SCALE,
-      Math.sqrt(START_PIXELS / Math.max(1, cssWidth * cssHeight)),
-    )
 
     const resize = () => {
-      const width = Math.max(1, Math.round(cssWidth * scale))
-      const height = Math.max(1, Math.round(cssHeight * scale))
+      const ratio = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO)
+      const width = Math.max(1, Math.round(cssWidth * ratio))
+      const height = Math.max(1, Math.round(cssHeight * ratio))
       if (canvas.width !== width || canvas.height !== height) {
         canvas.width = width
         canvas.height = height
@@ -157,39 +153,7 @@ export function AnimatedShaderBackground({ className }: { className?: string }) 
       }
     }
 
-    // Adaptive resolution: about once a second, compare the average frame
-    // interval with the target — the shortest interval seen (≈ the display's
-    // refresh interval), and never slower than 60 fps. Missing it → render
-    // fewer pixels; comfortably on time → a few more. The ceiling only ever
-    // comes down, so it settles instead of oscillating.
-    let ceiling = MAX_SCALE
-    let bestInterval = Infinity
-    let intervalSum = 0
-    let intervalCount = 0
-
-    const adapt = (interval: number) => {
-      bestInterval = Math.min(bestInterval, interval)
-      intervalSum += interval
-      intervalCount++
-      if (intervalSum < 1000) return
-      const average = intervalSum / intervalCount
-      const target = Math.min(bestInterval, 1000 / 60)
-      intervalSum = 0
-      intervalCount = 0
-      if (average > target * 1.25) {
-        ceiling = Math.max(MIN_SCALE, Math.min(ceiling, scale * 0.95))
-        // Cost grows with pixels (scale²), so aim straight at the target.
-        const step = Math.min(0.9, Math.max(0.5, Math.sqrt(target / average)))
-        scale = Math.max(MIN_SCALE, scale * step)
-      } else if (average < target * 1.1 && scale < ceiling) {
-        scale = Math.min(ceiling, scale * 1.1)
-      } else {
-        return
-      }
-      resize()
-    }
-
-    // Endless loop on real elapsed time: same speed at 60 or 144 Hz, and each
+    // Endless loop on real elapsed time: same speed at 60 or 240 Hz, and each
     // step is capped so coming back to the tab doesn't jump ahead.
     let time = 0
     let last: number | null = null
@@ -197,14 +161,10 @@ export function AnimatedShaderBackground({ className }: { className?: string }) 
 
     const render = (now: number) => {
       frame = requestAnimationFrame(render)
-      if (last !== null) {
-        const interval = now - last
-        time += Math.min(interval / 1000, 0.1)
-        // Skip the first seconds (page load hitches) and back-to-back
-        // callbacks; slow frames do count, that's what adapt() is for.
-        if (time > 2 && interval > 4) adapt(Math.min(interval, 1000))
-      }
+      if (last !== null) time += Math.min((now - last) / 1000, 0.1)
       last = now
+      // Every frame, so zoom or a move to another monitor is picked up too.
+      resize()
       gl.uniform1f(timeUniform, time)
       gl.uniform2f(resolutionUniform, canvas.width, canvas.height)
       gl.drawArrays(gl.TRIANGLES, 0, 3)
@@ -213,13 +173,7 @@ export function AnimatedShaderBackground({ className }: { className?: string }) 
     const resizeObserver = new ResizeObserver(([entry]) => {
       cssWidth = entry.contentRect.width
       cssHeight = entry.contentRect.height
-      resize()
     })
-
-    // The time spent in a hidden tab is neither animation nor a slow frame.
-    const onVisibilityChange = () => {
-      last = null
-    }
 
     // If the GPU drops the context (driver reset, too many contexts…), wait
     // for it to come back and carry on where the animation left off.
@@ -236,7 +190,6 @@ export function AnimatedShaderBackground({ className }: { className?: string }) 
     resize()
     setup()
     resizeObserver.observe(canvas)
-    document.addEventListener("visibilitychange", onVisibilityChange)
     canvas.addEventListener("webglcontextlost", onContextLost)
     canvas.addEventListener("webglcontextrestored", onContextRestored)
     frame = requestAnimationFrame(render)
@@ -244,7 +197,6 @@ export function AnimatedShaderBackground({ className }: { className?: string }) 
     return () => {
       cancelAnimationFrame(frame)
       resizeObserver.disconnect()
-      document.removeEventListener("visibilitychange", onVisibilityChange)
       canvas.removeEventListener("webglcontextlost", onContextLost)
       canvas.removeEventListener("webglcontextrestored", onContextRestored)
       gl.deleteBuffer(buffer)
